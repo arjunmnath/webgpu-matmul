@@ -1,103 +1,258 @@
-import Image from "next/image";
+// app/page.tsx
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+
+const MATRIX_SIZE = 4;
+const BUFFER_SIZE = MATRIX_SIZE * MATRIX_SIZE * 4; // Float32: 4 bytes each
+
+// WGSL shader for matrix multiplication
+const shaderCode = /* wgsl */ `
+struct Matrix {
+  numbers: array<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> matrixA: Matrix;
+@group(0) @binding(1) var<storage, read> matrixB: Matrix;
+@group(0) @binding(2) var<storage, write> matrixOut: Matrix;
+
+const MATRIX_SIZE: u32 = ${MATRIX_SIZE};
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= MATRIX_SIZE || id.y >= MATRIX_SIZE) {
+    return;
+  }
+  var sum: f32 = 0.0;
+  for (var i: u32 = 0u; i < MATRIX_SIZE; i = i + 1u) {
+    let aIndex = id.y * MATRIX_SIZE + i;
+    let bIndex = i * MATRIX_SIZE + id.x;
+    sum = sum + matrixA.numbers[aIndex] * matrixB.numbers[bIndex];
+  }
+  let index = id.y * MATRIX_SIZE + id.x;
+  matrixOut.numbers[index] = sum;
+}
+`;
+
+const createDefaultMatrix = () => {
+  // Create a default 4x4 matrix filled with 0's.
+  return Array.from({ length: MATRIX_SIZE }, () =>
+    Array.from({ length: MATRIX_SIZE }, () => 0)
+  );
+};
+
+export default function HomePage() {
+  const [matrixA, setMatrixA] = useState<number[][]>(() => {
+    // Identity matrix example
+    return createDefaultMatrix().map((row, i) =>
+      row.map((_, j) => (i === j ? 1 : 0))
+    );
+  });
+  const [matrixB, setMatrixB] = useState<number[][]>(() => {
+    // Example matrix
+    return createDefaultMatrix().map((row, i) =>
+      row.map((_, j) => i * MATRIX_SIZE + j + 1)
+    );
+  });
+  const [resultMatrix, setResultMatrix] = useState<number[][] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Helper function to update a matrix cell
+  const updateMatrix = (
+    matrix: number[][],
+    setMatrix: (m: number[][]) => void,
+    row: number,
+    col: number,
+    value: string
+  ) => {
+    const num = parseFloat(value);
+    const newMatrix = [...matrix];
+    newMatrix[row] = [...matrix[row]];
+    newMatrix[row][col] = isNaN(num) ? 0 : num;
+    setMatrix(newMatrix);
+  };
+
+  // WebGPU multiplication logic
+  const multiplyMatrices = async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      if (!navigator.gpu) {
+        throw new Error("WebGPU is not supported on this browser.");
+      }
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error("Failed to get GPU adapter.");
+      const device = await adapter.requestDevice();
+
+      // Flatten matrix arrays to Float32Array
+      const flatten = (matrix: number[][]) =>
+        new Float32Array(matrix.flat());
+      const aData = flatten(matrixA);
+      const bData = flatten(matrixB);
+
+      // Create GPU buffers
+      const aBuffer = device.createBuffer({
+        size: BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(aBuffer, 0, aData.buffer, aData.byteOffset, aData.byteLength);
+
+      const bBuffer = device.createBuffer({
+        size: BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(bBuffer, 0, bData.buffer, bData.byteOffset, bData.byteLength);
+
+      const resultBuffer = device.createBuffer({
+        size: BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      // Create shader module and compute pipeline
+      const shaderModule = device.createShaderModule({
+        code: shaderCode,
+      });
+      const pipeline = device.createComputePipeline({
+        layout: "auto",
+        compute: {
+          module: shaderModule,
+          entryPoint: "main",
+        },
+      });
+
+      // Create bind group to pass buffers to shader
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: aBuffer } },
+          { binding: 1, resource: { buffer: bBuffer } },
+          { binding: 2, resource: { buffer: resultBuffer } },
+        ],
+      });
+
+      // Encode the commands
+      const commandEncoder = device.createCommandEncoder();
+      const passEncoder = commandEncoder.beginComputePass();
+      passEncoder.setPipeline(pipeline);
+      passEncoder.setBindGroup(0, bindGroup);
+      // Dispatch with enough workgroups for a 4x4 grid. (Workgroup size is 8x8.)
+      passEncoder.dispatchWorkgroups(1, 1);
+      passEncoder.end();
+
+      device.queue.submit([commandEncoder.finish()]);
+
+      // Copy result buffer to a mappable buffer
+      const readBuffer = device.createBuffer({
+        size: BUFFER_SIZE,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const copyEncoder = device.createCommandEncoder();
+      copyEncoder.copyBufferToBuffer(resultBuffer, 0, readBuffer, 0, BUFFER_SIZE);
+      device.queue.submit([copyEncoder.finish()]);
+
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const resultArrayBuffer = readBuffer.getMappedRange();
+      const resultData = new Float32Array(resultArrayBuffer.slice(0));
+      readBuffer.unmap();
+
+      // Convert flat result to 2D matrix
+      const newResultMatrix: number[][] = [];
+      for (let i = 0; i < MATRIX_SIZE; i++) {
+        newResultMatrix.push(
+          Array.from(resultData.slice(i * MATRIX_SIZE, i * MATRIX_SIZE + MATRIX_SIZE))
+        );
+      }
+      setResultMatrix(newResultMatrix);
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setLoading(false);
+  };
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <main className="min-h-screen bg-black p-8">
+      <h1 className="text-4xl font-bold text-center mb-8 text-purple-400">
+        WebGPU Matrix Multiplication
+      </h1>
+      {error && (
+        <div className="bg-red-900 text-red-200 p-4 rounded mb-4 text-center">
+          {error}
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
+      )}
+      <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
+        {/* Matrix A Input */}
+        <div className="bg-gray-900 p-4 rounded shadow border border-gray-800">
+          <h2 className="text-2xl font-semibold mb-4 text-center text-purple-300">Matrix A</h2>
+          <div className="grid grid-cols-4 gap-2">
+            {matrixA.map((row, rowIndex) =>
+              row.map((value, colIndex) => (
+                <input
+                  key={`a-${rowIndex}-${colIndex}`}
+                  type="number"
+                  value={value}
+                  onChange={(e) =>
+                    updateMatrix(matrixA, setMatrixA, rowIndex, colIndex, e.target.value)
+                  }
+                  className="p-2 border border-gray-800 rounded text-center bg-gray-800 text-purple-200 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Matrix B Input */}
+        <div className="bg-gray-900 p-4 rounded shadow border border-gray-800">
+          <h2 className="text-2xl font-semibold mb-4 text-center text-purple-300">Matrix B</h2>
+          <div className="grid grid-cols-4 gap-2">
+            {matrixB.map((row, rowIndex) =>
+              row.map((value, colIndex) => (
+                <input
+                  key={`b-${rowIndex}-${colIndex}`}
+                  type="number"
+                  value={value}
+                  onChange={(e) =>
+                    updateMatrix(matrixB, setMatrixB, rowIndex, colIndex, e.target.value)
+                  }
+                  className="p-2 border border-gray-800 rounded text-center bg-gray-800 text-purple-200 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Result Display */}
+        <div className="bg-gray-900 p-4 rounded shadow border border-gray-800 flex flex-col items-center">
+          <h2 className="text-2xl font-semibold mb-4 text-purple-300">Result</h2>
+          {loading ? (
+            <div className="text-lg text-purple-300">Multiplying...</div>
+          ) : resultMatrix ? (
+            <div className="grid grid-cols-4 gap-2">
+              {resultMatrix.map((row, rowIndex) =>
+                row.map((value, colIndex) => (
+                  <div
+                    key={`res-${rowIndex}-${colIndex}`}
+                    className="p-2 border border-gray-800 rounded text-center bg-gray-800 text-purple-200"
+                  >
+                    {value.toFixed(2)}
+                  </div>
+                ))
+              )}
+            </div>
+          ) : (
+            <div className="text-lg text-gray-500">No result yet</div>
+          )}
+        </div>
+      </div>
+      <div className="text-center mt-8">
+        <button
+          onClick={multiplyMatrices}
+          className="px-6 py-3 bg-purple-700 hover:bg-purple-800 transition text-white font-semibold rounded disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+          disabled={loading}
         >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+          Multiply Matrices
+        </button>
+      </div>
+    </main>
   );
 }
