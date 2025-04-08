@@ -14,7 +14,7 @@ struct Matrix {
 
 @group(0) @binding(0) var<storage, read> matrixA: Matrix;
 @group(0) @binding(1) var<storage, read> matrixB: Matrix;
-@group(0) @binding(2) var<storage, write> matrixOut: Matrix;
+@group(0) @binding(2) var<storage, read_write> matrixOut: Matrix;
 
 const MATRIX_SIZE: u32 = ${MATRIX_SIZE};
 
@@ -23,14 +23,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= MATRIX_SIZE || id.y >= MATRIX_SIZE) {
     return;
   }
-  var sum: f32 = 0.0;
-  for (var i: u32 = 0u; i < MATRIX_SIZE; i = i + 1u) {
-    let aIndex = id.y * MATRIX_SIZE + i;
-    let bIndex = i * MATRIX_SIZE + id.x;
-    sum = sum + matrixA.numbers[aIndex] * matrixB.numbers[bIndex];
-  }
   let index = id.y * MATRIX_SIZE + id.x;
-  matrixOut.numbers[index] = sum;
+  matrixOut.numbers[index] = matrixA.numbers[index] * matrixB.numbers[index];
 }
 `;
 
@@ -141,7 +135,7 @@ export default function HomePage() {
       passEncoder.end();
 
       device.queue.submit([commandEncoder.finish()]);
-
+      console.log(resultMatrix);
       // Copy result buffer to a mappable buffer
       const readBuffer = device.createBuffer({
         size: BUFFER_SIZE,
@@ -150,7 +144,6 @@ export default function HomePage() {
       const copyEncoder = device.createCommandEncoder();
       copyEncoder.copyBufferToBuffer(resultBuffer, 0, readBuffer, 0, BUFFER_SIZE);
       device.queue.submit([copyEncoder.finish()]);
-
       await readBuffer.mapAsync(GPUMapMode.READ);
       const resultArrayBuffer = readBuffer.getMappedRange();
       const resultData = new Float32Array(resultArrayBuffer.slice(0));
